@@ -1,10 +1,8 @@
 {
-  "projectId": "remixed-project-id",
-  "appId": "remixed-app-id",
-  "apiKey": "remixed-api-key",
-  "authDomain": "remixed-auth-domain",
-  "firestoreDatabaseId": "remixed-firestore-database-id",
-  "storageBucket": "remixed-storage-bucket",
-  "messagingSenderId": "remixed-messaging-sender-id",
-  "measurementId": "remixed-measurement-id"
+  "apiKey": "AIzaSyAaeZIwujpZpdRNBS_L3Bwxstk6XTQDZ_o",
+  "authDomain": "maj-ships-db.firebaseapp.com",
+  "projectId": "maj-ships-db",
+  "storageBucket": "maj-ships-db.firebasestorage.app",
+  "messagingSenderId": "562758616068",
+  "appId": "1:562758616068:web:26888097c2620bdc6f6151"
 }
