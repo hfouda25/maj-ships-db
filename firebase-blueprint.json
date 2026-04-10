@@ -1,0 +1,98 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Authorized personnel with access to the database",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "format": "email" },
+        "password": { "type": "string" },
+        "name": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "user"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "password", "name", "role", "createdAt"]
+    },
+    "Ship": {
+      "title": "Ship",
+      "description": "Vessel registered in the database",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "imo": { "type": "string" },
+        "vesselType": { "type": "string" },
+        "flag": { "type": "string" },
+        "grossTonnage": { "type": "number" },
+        "registrationDate": { "type": "string", "format": "date-time" },
+        "sanctionStatus": { "type": "string" },
+        "inspections": { "type": "array" }
+      },
+      "required": ["name", "imo", "grossTonnage", "registrationDate"]
+    },
+    "Surveyor": {
+      "title": "Surveyor",
+      "description": "Non-exclusive surveyor details",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "location": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "phone": { "type": "string" },
+        "company": { "type": "string" }
+      },
+      "required": ["name", "location", "email", "phone"]
+    },
+    "Exemption": {
+      "title": "Exemption",
+      "description": "Ship relief or exemption record",
+      "type": "object",
+      "properties": {
+        "vesselName": { "type": "string" },
+        "imoNumber": { "type": "string" },
+        "type": { "type": "string", "enum": ["Exemption", "Extension"] },
+        "description": { "type": "string" },
+        "regulationRef": { "type": "string" },
+        "validFrom": { "type": "string" },
+        "validTo": { "type": "string" },
+        "status": { "type": "string", "enum": ["Pending", "Approved", "Rejected", "Expired"] },
+        "remarks": { "type": "string" }
+      },
+      "required": ["vesselName", "imoNumber", "type", "description", "status"]
+    },
+    "ClassSociety": {
+      "title": "ClassSociety",
+      "description": "Classification Society performance data",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "pscData": { "type": "array" },
+        "trend": { "type": "string", "enum": ["Up", "Down", "Steady"] },
+        "trendReason": { "type": "string" },
+        "lastUpdated": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "trend", "lastUpdated"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles and roles"
+    },
+    "/ships/{shipId}": {
+      "schema": "Ship",
+      "description": "Vessel registry"
+    },
+    "/surveyors/{surveyorId}": {
+      "schema": "Surveyor",
+      "description": "Surveyor directory"
+    },
+    "/exemptions/{exemptionId}": {
+      "schema": "Exemption",
+      "description": "Exemption and relief records"
+    },
+    "/classes/{classId}": {
+      "schema": "ClassSociety",
+      "description": "Classification Society performance records"
+    }
+  }
+}
