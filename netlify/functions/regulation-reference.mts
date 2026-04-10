@@ -1,7 +1,13 @@
 import type { Context } from "@netlify/functions";
 import { GoogleGenAI } from "@google/genai";
 
-const ai = new GoogleGenAI({});
+function getAIClient() {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error("GEMINI_API_KEY environment variable is not configured");
+  }
+  return new GoogleGenAI({ apiKey });
+}
 
 function parseJSON(text: string) {
   try {
@@ -18,6 +24,15 @@ function parseJSON(text: string) {
   } catch {
     return null;
   }
+}
+
+async function callWithTimeout<T>(fn: () => Promise<T>, timeoutMs: number): Promise<T> {
+  return Promise.race([
+    fn(),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("AI request timed out")), timeoutMs)
+    ),
+  ]);
 }
 
 export default async (req: Request, _context: Context) => {
@@ -38,28 +53,42 @@ export default async (req: Request, _context: Context) => {
       );
     }
 
-    const prompt = `
-    Based on the following description of a maritime exemption or extension request, provide the specific regulation reference from international maritime conventions (e.g., SOLAS, MARPOL, STCW, MLC, Load Line).
+    const prompt = `Based on this maritime exemption/extension request, provide the specific regulation reference from SOLAS, MARPOL, STCW, MLC, or Load Line conventions.
 
-    Description: "${description}"
+Description: "${description}"
 
-    Return strictly a JSON object with the following structure:
-    {
-      "reference": "e.g. SOLAS Chapter III, Regulation 20.1.1",
-      "convention": "e.g. SOLAS",
-      "explanation": "Brief 1-sentence explanation of why this regulation applies."
+Return strictly a JSON object:
+{
+  "reference": "e.g. SOLAS Chapter III, Regulation 20.1.1",
+  "convention": "e.g. SOLAS",
+  "explanation": "Brief 1-sentence explanation."
+}`;
+
+    const ai = getAIClient();
+
+    let response;
+    const maxAttempts = 2;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        response = await callWithTimeout(
+          () =>
+            ai.models.generateContent({
+              model: "gemini-2.0-flash",
+              contents: prompt,
+              config: {
+                tools: [{ googleSearch: {} }],
+              },
+            }),
+          20000
+        );
+        break;
+      } catch (err) {
+        if (attempt === maxAttempts) throw err;
+        await new Promise((r) => setTimeout(r, 1000));
+      }
     }
-  `;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: prompt,
-      config: {
-        tools: [{ googleSearch: {} }],
-      },
-    });
-
-    const text = response.text;
+    const text = response?.text;
     if (!text) {
       return new Response(JSON.stringify({ error: "No response from AI" }), {
         status: 502,

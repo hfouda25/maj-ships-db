@@ -271,8 +271,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
         );
       }
     } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
       setSearchError(
-        "Failed to connect to vessel database services. Please try again.",
+        `Vessel database service error: ${message}`,
       );
     } finally {
       setIsSearching(false);

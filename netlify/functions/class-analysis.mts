@@ -1,7 +1,13 @@
 import type { Context } from "@netlify/functions";
 import { GoogleGenAI } from "@google/genai";
 
-const ai = new GoogleGenAI({});
+function getAIClient() {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error("GEMINI_API_KEY environment variable is not configured");
+  }
+  return new GoogleGenAI({ apiKey });
+}
 
 function parseJSON(text: string) {
   try {
@@ -18,6 +24,15 @@ function parseJSON(text: string) {
   } catch {
     return null;
   }
+}
+
+async function callWithTimeout<T>(fn: () => Promise<T>, timeoutMs: number): Promise<T> {
+  return Promise.race([
+    fn(),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("AI request timed out")), timeoutMs)
+    ),
+  ]);
 }
 
 export default async (req: Request, _context: Context) => {
@@ -38,45 +53,51 @@ export default async (req: Request, _context: Context) => {
       );
     }
 
-    const prompt = `
-    Analyze the latest Port State Control (PSC) performance for the Classification Society: "${className}".
+    const prompt = `Find the latest Port State Control (PSC) performance for Classification Society "${className}".
 
-    Search Strategy:
-    - Search for "${className} Paris MoU performance list 2024" or "2023".
-    - Search for "${className} Tokyo MoU performance list 2024" or "2023".
-    - Search for "USCG PSC Annual Report 2023" and look for "${className}".
-    - If specific 2024 data isn't out, use the most recent available (2023).
-    - Be precise about the "White", "Grey", or "Black" list status.
-    1. Paris MoU: Search for the latest "White, Grey and Black List" in the most recent Annual Report.
-    2. Tokyo MoU: Search for the latest "Performance of Recognized Organizations" list in the most recent Annual Report.
-    3. USCG: Search for the latest "PSC Annual Report" and check the "Classification Society Performance" table (Targeted vs Non-Targeted).
+Check Paris MoU, Tokyo MoU, and USCG performance lists for White/Grey/Black list status.
 
-    Return strictly a JSON object:
-    {
-      "id": "${Date.now()}",
-      "name": "${className}",
-      "pscData": [
-        { "mou": "Paris MoU", "listStatus": "e.g. White List", "performanceLevel": "e.g. High" },
-        { "mou": "Tokyo MoU", "listStatus": "e.g. White List", "performanceLevel": "e.g. High" },
-        { "mou": "USCG", "listStatus": "e.g. Non-Targeted", "performanceLevel": "e.g. High" }
-      ],
-      "trend": "Up" | "Down" | "Steady",
-      "trendReason": "Detailed explanation of the performance across these regimes based on actual search results.",
-      "lastUpdated": "${new Date().toISOString()}"
+Return strictly a JSON object:
+{
+  "id": "${Date.now()}",
+  "name": "${className}",
+  "pscData": [
+    { "mou": "Paris MoU", "listStatus": "e.g. White List", "performanceLevel": "e.g. High" },
+    { "mou": "Tokyo MoU", "listStatus": "e.g. White List", "performanceLevel": "e.g. High" },
+    { "mou": "USCG", "listStatus": "e.g. Non-Targeted", "performanceLevel": "e.g. High" }
+  ],
+  "trend": "Up" | "Down" | "Steady",
+  "trendReason": "Explanation of performance across regimes.",
+  "lastUpdated": "${new Date().toISOString()}"
+}
+
+Use "Unknown" and "N/A" only if data is genuinely unavailable.`;
+
+    const ai = getAIClient();
+
+    let response;
+    const maxAttempts = 2;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        response = await callWithTimeout(
+          () =>
+            ai.models.generateContent({
+              model: "gemini-2.0-flash",
+              contents: prompt,
+              config: {
+                tools: [{ googleSearch: {} }],
+              },
+            }),
+          20000
+        );
+        break;
+      } catch (err) {
+        if (attempt === maxAttempts) throw err;
+        await new Promise((r) => setTimeout(r, 1000));
+      }
     }
 
-    If data is not found for a specific MOU, use "Unknown" and "N/A".
-  `;
-
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: prompt,
-      config: {
-        tools: [{ googleSearch: {} }],
-      },
-    });
-
-    const text = response.text;
+    const text = response?.text;
     if (!text) {
       return new Response(JSON.stringify({ error: "No response from AI" }), {
         status: 502,
