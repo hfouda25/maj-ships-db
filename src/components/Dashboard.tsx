@@ -112,6 +112,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   // Inspection State
   const [showInspectionForm, setShowInspectionForm] = useState(false);
   const [newInspection, setNewInspection] = useState<Partial<InspectionData>>({
+    date: new Date().toISOString().split("T")[0],
     inspectorName: "",
     location: "",
     deficienciesFound: 0,
@@ -365,7 +366,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
     const inspection: InspectionData = {
       id: Date.now().toString(),
-      date: new Date().toISOString(),
+      date: newInspection.date ? new Date(newInspection.date + "T00:00:00").toISOString() : new Date().toISOString(),
       inspectorName: newInspection.inspectorName || "Unknown",
       location: newInspection.location || "Unknown",
       deficienciesFound: newInspection.deficienciesFound || 0,
@@ -382,6 +383,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
       setSelectedShip({ ...selectedShip, inspections: updatedInspections });
       setShowInspectionForm(false);
       setNewInspection({
+        date: new Date().toISOString().split("T")[0],
         inspectorName: "",
         location: "",
         deficienciesFound: 0,
@@ -602,6 +604,15 @@ export const Dashboard: React.FC<DashboardProps> = ({
     count: flagData[key],
   }));
 
+  // Ships with inspections overdue (>1 year since last inspection)
+  const oneYearAgo = new Date();
+  oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+  const overdueShips = ships.filter((ship) => {
+    if (!ship.inspections || ship.inspections.length === 0) return false;
+    const lastInspection = ship.inspections[ship.inspections.length - 1];
+    return new Date(lastInspection.date) < oneYearAgo;
+  });
+
   // Helper to generate subject line
   const getLetterSubject = (prefix: string = "") => {
     let subject = "AUTHORIZATION TO CONDUCT FLAG STATE INSPECTION";
@@ -745,7 +756,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
               <h2 className="text-xl font-semibold text-gray-700">
                 Fleet Overview
               </h2>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
                 <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
                   <div className="flex justify-between items-start">
                     <div>
@@ -793,6 +804,22 @@ export const Dashboard: React.FC<DashboardProps> = ({
                     </div>
                   </div>
                 </div>
+
+                <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+                  <div className="flex justify-between items-start">
+                    <div>
+                      <p className="text-sm font-medium text-gray-500">
+                        Inspections Overdue
+                      </p>
+                      <h3 className={`text-3xl font-bold mt-2 ${overdueShips.length > 0 ? "text-orange-600" : "text-green-600"}`}>
+                        {overdueShips.length}
+                      </h3>
+                    </div>
+                    <div className={`p-3 rounded-lg ${overdueShips.length > 0 ? "bg-orange-50" : "bg-green-50"}`}>
+                      <CalendarCheck className={overdueShips.length > 0 ? "text-orange-600" : "text-green-600"} size={24} />
+                    </div>
+                  </div>
+                </div>
               </div>
 
               {chartData.length > 0 && (
@@ -820,6 +847,58 @@ export const Dashboard: React.FC<DashboardProps> = ({
                         </Bar>
                       </BarChart>
                     </ResponsiveContainer>
+                  </div>
+                </div>
+              )}
+
+              {/* Inspection Overdue Alerts */}
+              {overdueShips.length > 0 && (
+                <div className="bg-white p-6 rounded-xl shadow-sm border border-orange-200 mt-6">
+                  <h3 className="text-lg font-bold text-orange-700 mb-4 flex items-center gap-2">
+                    <AlertTriangle size={20} className="text-orange-600" />
+                    Inspection Overdue — Over 1 Year Since Last Inspection ({overdueShips.length})
+                  </h3>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-sm">
+                      <thead className="bg-orange-50 text-orange-700">
+                        <tr>
+                          <th className="px-4 py-3 font-medium">Vessel Name</th>
+                          <th className="px-4 py-3 font-medium">IMO</th>
+                          <th className="px-4 py-3 font-medium">Last Inspection Date</th>
+                          <th className="px-4 py-3 font-medium">Days Overdue</th>
+                          <th className="px-4 py-3 font-medium">Last Inspection Comments</th>
+                          <th className="px-4 py-3 font-medium">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-orange-100">
+                        {overdueShips.map((ship) => {
+                          const lastInsp = ship.inspections[ship.inspections.length - 1];
+                          const lastDate = new Date(lastInsp.date);
+                          const daysOverdue = Math.floor((Date.now() - lastDate.getTime() - 365 * 24 * 60 * 60 * 1000) / (1000 * 60 * 60 * 24));
+                          return (
+                            <tr key={ship.id} className="hover:bg-orange-50 transition">
+                              <td className="px-4 py-3 font-semibold text-navy-900">{ship.name}</td>
+                              <td className="px-4 py-3 text-gray-600">{ship.imo}</td>
+                              <td className="px-4 py-3 text-gray-600">{lastDate.toLocaleDateString()}</td>
+                              <td className="px-4 py-3">
+                                <span className="bg-orange-100 text-orange-800 px-2 py-1 rounded text-xs font-bold">
+                                  {daysOverdue} days
+                                </span>
+                              </td>
+                              <td className="px-4 py-3 text-gray-600 max-w-xs truncate">{lastInsp.comments || "N/A"}</td>
+                              <td className="px-4 py-3">
+                                <button
+                                  onClick={() => { setActiveTab("list"); setSelectedShip(ship); }}
+                                  className="text-blue-600 hover:text-blue-800 font-medium text-sm"
+                                >
+                                  View Details
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
                   </div>
                 </div>
               )}
@@ -1042,6 +1121,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       <th className="px-6 py-4 font-medium">Type</th>
                       <th className="px-6 py-4 font-medium">Flag</th>
                       <th className="px-6 py-4 font-medium">Status</th>
+                      <th className="px-6 py-4 font-medium hidden print:table-cell">Last Inspection</th>
+                      <th className="px-6 py-4 font-medium hidden print:table-cell">Inspection Comments</th>
                       <th className="px-6 py-4 font-medium print:hidden">Action</th>
                     </tr>
                   </thead>
@@ -1062,6 +1143,16 @@ export const Dashboard: React.FC<DashboardProps> = ({
                           >
                             {ship.sanctionStatus?.toUpperCase() || "ACTIVE"}
                           </span>
+                        </td>
+                        <td className="px-6 py-4 hidden print:table-cell text-sm text-gray-600">
+                          {ship.inspections && ship.inspections.length > 0
+                            ? new Date(ship.inspections[ship.inspections.length - 1].date).toLocaleDateString()
+                            : "N/A"}
+                        </td>
+                        <td className="px-6 py-4 hidden print:table-cell text-sm text-gray-600">
+                          {ship.inspections && ship.inspections.length > 0
+                            ? ship.inspections[ship.inspections.length - 1].comments || "N/A"
+                            : "N/A"}
                         </td>
                         <td className="px-6 py-4 print:hidden">
                           <div className="flex items-center gap-3">
@@ -1908,6 +1999,23 @@ export const Dashboard: React.FC<DashboardProps> = ({
                             className="space-y-4"
                           >
                             <div className="grid grid-cols-2 gap-4">
+                              <div>
+                                <label className="block text-sm font-medium text-gray-700">
+                                  Date of Inspection
+                                </label>
+                                <input
+                                  required
+                                  type="date"
+                                  className="w-full p-2 border rounded"
+                                  value={newInspection.date || new Date().toISOString().split("T")[0]}
+                                  onChange={(e) =>
+                                    setNewInspection({
+                                      ...newInspection,
+                                      date: e.target.value,
+                                    })
+                                  }
+                                />
+                              </div>
                               <div>
                                 <label className="block text-sm font-medium text-gray-700">
                                   Inspector Name
