@@ -1,17 +1,10 @@
 import type { Context } from "@netlify/functions";
+import { GoogleGenAI } from "@google/genai";
 
-const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-
-function getOpenRouterConfig() {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  const model = process.env.OPENROUTER_MODEL || "openai/gpt-4o-mini";
-
-  if (!apiKey) {
-    throw new Error("OPENROUTER_API_KEY environment variable is not configured in Netlify");
-  }
-
-  return { apiKey, model };
-}
+// Netlify AI Gateway injects the Gemini credentials at runtime, so no API key
+// needs to be configured or managed manually. A zero-config client is enough.
+const ai = new GoogleGenAI({});
+const MODEL = (process.env.GEMINI_MODEL || "gemini-2.5-flash").trim();
 
 function jsonResponse(payload: unknown, status = 200) {
   return new Response(JSON.stringify(payload), {
@@ -41,58 +34,57 @@ async function callWithTimeout<T>(fn: () => Promise<T>, timeoutMs: number): Prom
   return Promise.race([
     fn(),
     new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("OpenRouter AI request timed out")), timeoutMs)
+      setTimeout(() => reject(new Error("AI request timed out")), timeoutMs)
     ),
   ]);
 }
 
-async function callOpenRouterJSON(prompt: string): Promise<Record<string, unknown>> {
-  const { apiKey, model } = getOpenRouterConfig();
+async function generate(prompt: string, systemInstruction: string, maxOutputTokens: number, grounded: boolean) {
+  const config: Record<string, unknown> = {
+    systemInstruction,
+    temperature: 0.1,
+    maxOutputTokens,
+  };
 
-  const response = await callWithTimeout(
-    () =>
-      fetch(OPENROUTER_URL, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-          "HTTP-Referer": "https://maj-ship-db.netlify.app",
-          "X-OpenRouter-Title": "MAJ Ships Database",
-        },
-        body: JSON.stringify({
-          model,
-          messages: [
-            {
-              role: "system",
-              content:
-                "You are a maritime vessel data assistant. Use web search where available. Return only one valid JSON object. Do not include markdown, notes, or explanations outside JSON.",
-            },
-            { role: "user", content: prompt },
-          ],
-          response_format: { type: "json_object" },
-          plugins: [{ id: "web" }, { id: "response-healing" }],
-          temperature: 0.1,
-          max_tokens: 1800,
-        }),
-      }),
-    30000
-  );
-
-  const data = await response.json().catch(() => null) as any;
-
-  if (!response.ok) {
-    const detail = data?.error?.message || data?.message || JSON.stringify(data) || response.statusText;
-    throw new Error(`OpenRouter API error ${response.status}: ${detail}`);
+  if (grounded) {
+    // Use Google Search grounding when the gateway allows it for fresher data.
+    config.tools = [{ googleSearch: {} }];
+  } else {
+    config.responseMimeType = "application/json";
   }
 
-  const text = data?.choices?.[0]?.message?.content;
-  if (!text || typeof text !== "string") {
-    throw new Error(`OpenRouter returned no AI text. Raw response: ${JSON.stringify(data).slice(0, 500)}`);
+  const response = await ai.models.generateContent({
+    model: MODEL,
+    contents: prompt,
+    config,
+  });
+
+  return response.text ?? "";
+}
+
+async function callGeminiJSON(
+  prompt: string,
+  systemInstruction: string,
+  maxOutputTokens: number
+): Promise<Record<string, unknown>> {
+  // Prefer a grounded (web-search) answer, but never let an unsupported feature
+  // block the response: fall back to a plain strict-JSON completion.
+  let text = "";
+  try {
+    text = await callWithTimeout(() => generate(prompt, systemInstruction, maxOutputTokens, true), 24000);
+  } catch {
+    text = "";
   }
 
-  const parsed = parseJSON(text);
+  let parsed = text ? parseJSON(text) : null;
+
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(`OpenRouter returned invalid JSON: ${text.slice(0, 500)}`);
+    text = await callWithTimeout(() => generate(prompt, systemInstruction, maxOutputTokens, false), 24000);
+    parsed = parseJSON(text);
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`AI returned invalid JSON: ${String(text).slice(0, 500)}`);
   }
 
   return parsed as Record<string, unknown>;
@@ -132,7 +124,7 @@ export default async (req: Request, _context: Context) => {
       return jsonResponse({ error: "shipName and imoNumber are required" }, 400);
     }
 
-    const prompt = `Search the web for the merchant vessel "${shipName}" with IMO number "${imoNumber}".
+    const prompt = `Search for the merchant vessel "${shipName}" with IMO number "${imoNumber}".
 
 Use reliable maritime/public sources where available, such as Equasis, MarineTraffic, VesselFinder, BalticShipping, class society public registers, sanction lists, and port state control references.
 
@@ -160,11 +152,15 @@ Return strictly this JSON object with exactly these keys:
 
 Rules:
 - Do not invent data.
-- Use Unknown only when the web search cannot verify the field.
+- Use Unknown only when the field cannot be verified.
 - grossTonnage must be a number only.
 - isSanctioned must be boolean only.`;
 
-    const result = await callOpenRouterJSON(prompt);
+    const result = await callGeminiJSON(
+      prompt,
+      "You are a maritime vessel data assistant. Return only one valid JSON object. Do not include markdown, notes, or explanations outside JSON.",
+      1800
+    );
 
     const normalized = {
       name: toStringValue(result.name, shipName),
