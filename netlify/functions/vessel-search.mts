@@ -1,98 +1,32 @@
 import type { Context } from "@netlify/functions";
 
-type OpenRouterConfig = {
-  apiKey: string;
-  model: string;
-};
-
-function getOpenRouterConfig(): OpenRouterConfig {
+function getOpenRouterConfig() {
   const apiKey = process.env.OPENROUTER_API_KEY;
-  const configuredModel = process.env.OPENROUTER_MODEL || "openai/gpt-4o-mini";
+  const model = process.env.OPENROUTER_MODEL || "openai/gpt-4o-mini";
 
   if (!apiKey) {
-    throw new Error("OPENROUTER_API_KEY environment variable is not configured");
+    throw new Error("OPENROUTER_API_KEY environment variable is not configured in Netlify");
   }
-
-  // Vessel particulars need current web data. The :online variant enables OpenRouter web search.
-  const model = configuredModel.endsWith(":online")
-    ? configuredModel
-    : `${configuredModel}:online`;
 
   return { apiKey, model };
 }
 
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      "Content-Type": "application/json",
-      "Cache-Control": "no-store",
-    },
-  });
-}
-
-function parseJSON(text: string): any | null {
+function parseJSON(text: string) {
   try {
     const cleaned = text.trim();
-    const fenced = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-    if (fenced?.[1]) return JSON.parse(fenced[1].trim());
+    const jsonMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    if (jsonMatch && jsonMatch[1]) return JSON.parse(jsonMatch[1].trim());
 
-    const start = cleaned.indexOf("{");
-    const end = cleaned.lastIndexOf("}");
-    if (start !== -1 && end !== -1 && end > start) {
-      return JSON.parse(cleaned.slice(start, end + 1));
+    const startIndex = cleaned.indexOf("{");
+    const endIndex = cleaned.lastIndexOf("}");
+    if (startIndex !== -1 && endIndex !== -1 && endIndex >= startIndex) {
+      return JSON.parse(cleaned.substring(startIndex, endIndex + 1));
     }
 
     return JSON.parse(cleaned);
   } catch {
     return null;
   }
-}
-
-function normalizeString(value: unknown, fallback = "Unknown"): string {
-  if (typeof value !== "string") return fallback;
-  const trimmed = value.trim();
-  return trimmed.length ? trimmed : fallback;
-}
-
-function normalizeNumber(value: unknown): number {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string") {
-    const parsed = Number(value.replace(/[^0-9.]/g, ""));
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return 0;
-}
-
-function normalizeBoolean(value: unknown): boolean {
-  if (typeof value === "boolean") return value;
-  if (typeof value === "string") {
-    return ["true", "yes", "sanctioned", "listed"].includes(value.toLowerCase());
-  }
-  return false;
-}
-
-function normalizeVesselResult(raw: any, shipName: string, imoNumber: string) {
-  return {
-    name: normalizeString(raw?.name, shipName),
-    imo: normalizeString(raw?.imo, imoNumber),
-    grossTonnage: normalizeNumber(raw?.grossTonnage),
-    yearBuilt: normalizeString(raw?.yearBuilt),
-    type: normalizeString(raw?.type),
-    flag: normalizeString(raw?.flag),
-    lengthOverall: normalizeString(raw?.lengthOverall, "N/A"),
-    beam: normalizeString(raw?.beam, "N/A"),
-    draft: normalizeString(raw?.draft, "N/A"),
-    builder: normalizeString(raw?.builder),
-    location: normalizeString(raw?.location),
-    classSociety: normalizeString(raw?.classSociety),
-    classSocietyUrl: normalizeString(raw?.classSocietyUrl, ""),
-    sanctionInfo: normalizeString(raw?.sanctionInfo, "No sanctions identified from available public information."),
-    isSanctioned: normalizeBoolean(raw?.isSanctioned),
-    lastSurveyDate: normalizeString(raw?.lastSurveyDate),
-    certificateStatus: normalizeString(raw?.certificateStatus),
-    description: normalizeString(raw?.description, `${shipName} IMO ${imoNumber}.`),
-  };
 }
 
 async function callWithTimeout<T>(fn: () => Promise<T>, timeoutMs: number): Promise<T> {
@@ -104,7 +38,21 @@ async function callWithTimeout<T>(fn: () => Promise<T>, timeoutMs: number): Prom
   ]);
 }
 
-async function callOpenRouterJSON(prompt: string): Promise<any> {
+function getMessageText(message: any): string {
+  const content = message?.content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === "string") return part;
+        return part?.text || part?.content || "";
+      })
+      .join("\n");
+  }
+  return "";
+}
+
+async function callOpenRouter(prompt: string) {
   const { apiKey, model } = getOpenRouterConfig();
 
   const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -121,114 +69,158 @@ async function callOpenRouterJSON(prompt: string): Promise<any> {
         {
           role: "system",
           content:
-            "You are a maritime vessel database assistant. Use current public web information where available. Return only one valid JSON object. Do not return markdown. Do not invent data. Use Unknown or 0 only when the information cannot be verified.",
+            "You are a professional maritime vessel database assistant. Use available public web information when web search is available. Return valid JSON only. Do not use markdown. Do not rename keys. Do not invent facts; use Unknown or 0 only when unavailable.",
         },
         { role: "user", content: prompt },
       ],
+      plugins: [{ id: "web", max_results: 5 }],
       temperature: 0.1,
-      response_format: { type: "json_object" },
+      max_tokens: 1600,
     }),
   });
 
   const responseText = await response.text();
-
   if (!response.ok) {
-    throw new Error(`OpenRouter request failed: ${response.status} ${responseText}`);
+    console.error("OpenRouter vessel-search failed:", response.status, responseText);
+    throw new Error(`OpenRouter failed (${response.status}). Check Netlify function log for details.`);
   }
 
-  const data = JSON.parse(responseText);
-  const content = data?.choices?.[0]?.message?.content;
-  const text = typeof content === "string"
-    ? content
-    : Array.isArray(content)
-      ? content.map((part) => part?.text || "").join("\n")
-      : "";
+  let data: any;
+  try {
+    data = JSON.parse(responseText);
+  } catch {
+    console.error("OpenRouter returned invalid wrapper JSON:", responseText);
+    throw new Error("OpenRouter returned invalid API response");
+  }
+
+  const text = getMessageText(data?.choices?.[0]?.message);
+  if (!text) {
+    console.error("OpenRouter response missing message content:", responseText);
+    throw new Error("OpenRouter returned no AI content");
+  }
 
   const parsed = parseJSON(text);
   if (!parsed) {
-    throw new Error("OpenRouter returned non-JSON vessel data");
+    console.error("OpenRouter returned non-JSON content:", text);
+    throw new Error("AI returned non-JSON vessel data");
   }
 
   return parsed;
 }
 
+function normalizeResult(raw: any, shipName: string, imoNumber: string) {
+  const s = (v: any, fallback = "Unknown") =>
+    typeof v === "string" && v.trim() ? v.trim() : fallback;
+  const n = (v: any) => {
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+    if (typeof v === "string") {
+      const parsed = Number(v.replace(/[^0-9.]/g, ""));
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return 0;
+  };
+  const b = (v: any) => {
+    if (typeof v === "boolean") return v;
+    if (typeof v === "string") return ["true", "yes", "sanctioned", "listed"].includes(v.toLowerCase());
+    return false;
+  };
+
+  return {
+    name: s(raw?.name, shipName),
+    imo: s(raw?.imo, imoNumber),
+    grossTonnage: n(raw?.grossTonnage),
+    yearBuilt: s(raw?.yearBuilt),
+    type: s(raw?.type),
+    flag: s(raw?.flag),
+    lengthOverall: s(raw?.lengthOverall, "N/A"),
+    beam: s(raw?.beam, "N/A"),
+    draft: s(raw?.draft, "N/A"),
+    builder: s(raw?.builder),
+    location: s(raw?.location),
+    classSociety: s(raw?.classSociety),
+    classSocietyUrl: s(raw?.classSocietyUrl, ""),
+    sanctionInfo: s(raw?.sanctionInfo, "No sanctions identified from available public information."),
+    isSanctioned: b(raw?.isSanctioned),
+    lastSurveyDate: s(raw?.lastSurveyDate),
+    certificateStatus: s(raw?.certificateStatus),
+    description: s(raw?.description, `Vessel ${shipName}, IMO ${imoNumber}.`),
+  };
+}
+
 export default async (req: Request, _context: Context) => {
   if (req.method !== "POST") {
-    return jsonResponse({ error: "Method not allowed" }, 405);
+    return new Response(JSON.stringify({ error: "Method not allowed" }), {
+      status: 405,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   try {
     const { shipName, imoNumber } = await req.json();
 
     if (!shipName || !imoNumber) {
-      return jsonResponse({ error: "shipName and imoNumber are required" }, 400);
+      return new Response(JSON.stringify({ error: "shipName and imoNumber are required" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
     }
 
-    const prompt = `Search current public web sources for the merchant vessel "${shipName}" with IMO number "${imoNumber}".
+    const prompt = `Search for the merchant vessel "${shipName}" with IMO number "${imoNumber}".
 
-Find and verify as much as possible:
-- Gross tonnage
-- Year built
-- Vessel type
-- Flag
-- Length overall / LOA
-- Beam
-- Draft
-- Builder / shipyard
-- Current or last known AIS/location if available
-- Classification society
-- Public class society or vessel record URL if available
-- Sanction status from OFAC, UN, EU or other public sanctions sources
-- Last survey date if available
-- Certificate/class status if available
+Find: GT, year built, type, flag, LOA, beam, draft, builder, current or last known AIS location, classification society, class society URL, sanction status from OFAC/UN/EU if available, last survey date, and certificate/class status.
 
-Return strictly this JSON object and keep these exact field names:
+Return strictly one valid JSON object with these exact keys:
 {
   "name": "${shipName}",
   "imo": "${imoNumber}",
   "grossTonnage": 0,
-  "yearBuilt": "Unknown",
-  "type": "Unknown",
-  "flag": "Unknown",
-  "lengthOverall": "N/A",
-  "beam": "N/A",
-  "draft": "N/A",
-  "builder": "Unknown",
-  "location": "Unknown",
-  "classSociety": "Unknown",
-  "classSocietyUrl": "",
-  "sanctionInfo": "No sanctions identified from available public information.",
+  "yearBuilt": "YYYY or Unknown",
+  "type": "Vessel Type or Unknown",
+  "flag": "Flag State or Unknown",
+  "lengthOverall": "e.g. 299.9 m or N/A",
+  "beam": "e.g. 48.2 m or N/A",
+  "draft": "e.g. 14.5 m or N/A",
+  "builder": "Shipyard Name or Unknown",
+  "location": "Current/last known location or Unknown",
+  "classSociety": "Class Society Name or Unknown",
+  "classSocietyUrl": "URL or empty string",
+  "sanctionInfo": "Summary",
   "isSanctioned": false,
-  "lastSurveyDate": "Unknown",
-  "certificateStatus": "Unknown",
+  "lastSurveyDate": "Date or Unknown",
+  "certificateStatus": "Status or Unknown",
   "description": "Brief 2 sentence summary."
 }
 
-Important rules:
-- Return JSON only.
-- Do not rename any key.
-- grossTonnage must be a number only.
-- isSanctioned must be true or false.
+Rules:
+- JSON only.
+- Keep exact key names.
+- grossTonnage must be number only.
+- isSanctioned must be boolean only.
 - Use Unknown/N/A only if the data cannot be verified.`;
 
-    let raw: any;
+    let result: any;
     const maxAttempts = 2;
-
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        raw = await callWithTimeout(() => callOpenRouterJSON(prompt), 30000);
+        result = await callWithTimeout(() => callOpenRouter(prompt), 35000);
         break;
       } catch (err) {
         if (attempt === maxAttempts) throw err;
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+        await new Promise((r) => setTimeout(r, 1000));
       }
     }
 
-    return jsonResponse(normalizeVesselResult(raw, shipName, imoNumber));
+    return new Response(JSON.stringify(normalizeResult(result, shipName, imoNumber)), {
+      status: 200,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Internal server error";
     console.error("Vessel search error:", message);
-    return jsonResponse({ error: message }, 500);
+    return new Response(JSON.stringify({ error: message }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 };
 
