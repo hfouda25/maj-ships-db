@@ -1,12 +1,14 @@
 import type { Context } from "@netlify/functions";
-import { GoogleGenAI } from "@google/genai";
 
-function getAIClient() {
-  const apiKey = process.env.GEMINI_API_KEY;
+function getOpenRouterConfig() {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  const model = process.env.OPENROUTER_MODEL || "openai/gpt-4o-mini";
+
   if (!apiKey) {
-    throw new Error("GEMINI_API_KEY environment variable is not configured");
+    throw new Error("OPENROUTER_API_KEY environment variable is not configured");
   }
-  return new GoogleGenAI({ apiKey });
+
+  return { apiKey, model };
 }
 
 function parseJSON(text: string) {
@@ -33,6 +35,47 @@ async function callWithTimeout<T>(fn: () => Promise<T>, timeoutMs: number): Prom
       setTimeout(() => reject(new Error("AI request timed out")), timeoutMs)
     ),
   ]);
+}
+
+async function callOpenRouter(prompt: string): Promise<string | undefined> {
+  const { apiKey, model } = getOpenRouterConfig();
+
+  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      "HTTP-Referer": process.env.URL || "https://maj-ships-db.netlify.app",
+      "X-Title": "MAJ Ships DB",
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a maritime vessel database assistant. Return only valid JSON when requested. Use reliable public vessel information where available. If data is unavailable, use Unknown or 0 instead of guessing.",
+        },
+        { role: "user", content: prompt },
+      ],
+      temperature: 0.2,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`OpenRouter request failed: ${response.status} ${errorText}`);
+  }
+
+  const data = await response.json();
+  const content = data?.choices?.[0]?.message?.content;
+
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content.map((part) => part?.text || "").join("\n").trim();
+  }
+
+  return undefined;
 }
 
 export default async (req: Request, _context: Context) => {
@@ -81,32 +124,18 @@ Return strictly a valid JSON object:
 
 Use "Unknown" or 0 only if data is genuinely unavailable.`;
 
-    const ai = getAIClient();
-
-    let response;
+    let text: string | undefined;
     const maxAttempts = 2;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        response = await callWithTimeout(
-          () =>
-            ai.models.generateContent({
-              model: "gemini-2.0-flash",
-              contents: prompt,
-              config: {
-                tools: [{ googleSearch: {} }],
-              },
-            }),
-          20000
-        );
+        text = await callWithTimeout(() => callOpenRouter(prompt), 20000);
         break;
       } catch (err) {
         if (attempt === maxAttempts) throw err;
-        // Brief pause before retry
         await new Promise((r) => setTimeout(r, 1000));
       }
     }
 
-    const text = response?.text;
     if (!text) {
       return new Response(JSON.stringify({ error: "No response from AI" }), {
         status: 502,
