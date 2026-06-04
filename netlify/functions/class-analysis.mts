@@ -1,5 +1,7 @@
 import type { Context } from "@netlify/functions";
 
+const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
+
 function getOpenRouterConfig() {
   const apiKey = process.env.OPENROUTER_API_KEY;
   const model = process.env.OPENROUTER_MODEL || "openai/gpt-4o-mini";
@@ -11,19 +13,25 @@ function getOpenRouterConfig() {
   return { apiKey, model };
 }
 
+function jsonResponse(payload: unknown, status = 200) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
 function parseJSON(text: string) {
   try {
-    const cleaned = text.trim();
-    const jsonMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-    if (jsonMatch && jsonMatch[1]) return JSON.parse(jsonMatch[1].trim());
+    const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/i);
+    if (jsonMatch?.[1]) return JSON.parse(jsonMatch[1].trim());
 
-    const startIndex = cleaned.indexOf("{");
-    const endIndex = cleaned.lastIndexOf("}");
+    const startIndex = text.indexOf("{");
+    const endIndex = text.lastIndexOf("}");
     if (startIndex !== -1 && endIndex !== -1 && endIndex >= startIndex) {
-      return JSON.parse(cleaned.substring(startIndex, endIndex + 1));
+      return JSON.parse(text.substring(startIndex, endIndex + 1));
     }
 
-    return JSON.parse(cleaned);
+    return JSON.parse(text.trim());
   } catch {
     return null;
   }
@@ -33,180 +41,158 @@ async function callWithTimeout<T>(fn: () => Promise<T>, timeoutMs: number): Prom
   return Promise.race([
     fn(),
     new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("AI request timed out")), timeoutMs)
+      setTimeout(() => reject(new Error("OpenRouter AI request timed out")), timeoutMs)
     ),
   ]);
 }
 
-function getMessageText(message: any): string {
-  const content = message?.content;
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => {
-        if (typeof part === "string") return part;
-        return part?.text || part?.content || "";
-      })
-      .join("\n");
-  }
-  return "";
-}
-
-async function callOpenRouter(prompt: string) {
+async function callOpenRouterJSON(prompt: string): Promise<Record<string, unknown>> {
   const { apiKey, model } = getOpenRouterConfig();
 
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": process.env.URL || "https://maj-ship-db.netlify.app",
-      "X-Title": "MAJ Ships DB",
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are a maritime PSC/classification society performance analyst. Use public web information where available. Return valid JSON only. Do not use markdown. Keep exact field names.",
+  const response = await callWithTimeout(
+    () =>
+      fetch(OPENROUTER_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": "https://maj-ship-db.netlify.app",
+          "X-OpenRouter-Title": "MAJ Ships Database",
         },
-        { role: "user", content: prompt },
-      ],
-      plugins: [{ id: "web", max_results: 5 }],
-      temperature: 0.1,
-      max_tokens: 1400,
-    }),
-  });
+        body: JSON.stringify({
+          model,
+          messages: [
+            {
+              role: "system",
+              content:
+                "You are a maritime PSC/class society performance assistant. Use web search where available. Return only one valid JSON object. Do not include markdown, notes, or explanations outside JSON.",
+            },
+            { role: "user", content: prompt },
+          ],
+          response_format: { type: "json_object" },
+          plugins: [{ id: "web" }, { id: "response-healing" }],
+          temperature: 0.1,
+          max_tokens: 1600,
+        }),
+      }),
+    30000
+  );
 
-  const responseText = await response.text();
+  const data = await response.json().catch(() => null) as any;
+
   if (!response.ok) {
-    console.error("OpenRouter class-analysis failed:", response.status, responseText);
-    throw new Error(`OpenRouter failed (${response.status}). Check Netlify function log for details.`);
+    const detail = data?.error?.message || data?.message || JSON.stringify(data) || response.statusText;
+    throw new Error(`OpenRouter API error ${response.status}: ${detail}`);
   }
 
-  let data: any;
-  try {
-    data = JSON.parse(responseText);
-  } catch {
-    console.error("OpenRouter returned invalid wrapper JSON:", responseText);
-    throw new Error("OpenRouter returned invalid API response");
-  }
-
-  const text = getMessageText(data?.choices?.[0]?.message);
-  if (!text) {
-    console.error("OpenRouter response missing message content:", responseText);
-    throw new Error("OpenRouter returned no AI content");
+  const text = data?.choices?.[0]?.message?.content;
+  if (!text || typeof text !== "string") {
+    throw new Error(`OpenRouter returned no AI text. Raw response: ${JSON.stringify(data).slice(0, 500)}`);
   }
 
   const parsed = parseJSON(text);
-  if (!parsed) {
-    console.error("OpenRouter returned non-JSON content:", text);
-    throw new Error("AI returned non-JSON class data");
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`OpenRouter returned invalid JSON: ${text.slice(0, 500)}`);
   }
 
-  return parsed;
+  return parsed as Record<string, unknown>;
 }
 
-function normalizeClassResult(raw: any, className: string) {
-  const now = new Date().toISOString();
-  const pscData = Array.isArray(raw?.pscData) ? raw.pscData : [];
+function toStringValue(value: unknown, fallback = "Unknown") {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return fallback;
+}
 
-  const findEntry = (name: string) => {
-    const entry = pscData.find((x: any) =>
-      typeof x?.mou === "string" && x.mou.toLowerCase().includes(name.toLowerCase())
+function normalizePSCData(value: unknown) {
+  const defaults = [
+    { mou: "Paris MoU", listStatus: "Unknown", performanceLevel: "Unknown" },
+    { mou: "Tokyo MoU", listStatus: "Unknown", performanceLevel: "Unknown" },
+    { mou: "USCG", listStatus: "Unknown", performanceLevel: "Unknown" },
+  ];
+
+  if (!Array.isArray(value)) return defaults;
+
+  return defaults.map((fallback) => {
+    const found = value.find((item: any) =>
+      typeof item?.mou === "string" &&
+      item.mou.toLowerCase().replace(/\s+/g, "").includes(fallback.mou.toLowerCase().replace(/\s+/g, ""))
     );
+
     return {
-      mou: name === "USCG" ? "USCG" : `${name} MoU`,
-      listStatus: typeof entry?.listStatus === "string" && entry.listStatus.trim() ? entry.listStatus.trim() : "Unknown",
-      performanceLevel:
-        typeof entry?.performanceLevel === "string" && entry.performanceLevel.trim()
-          ? entry.performanceLevel.trim()
-          : "Unknown",
+      mou: fallback.mou,
+      listStatus: toStringValue(found?.listStatus, fallback.listStatus),
+      performanceLevel: toStringValue(found?.performanceLevel, fallback.performanceLevel),
     };
-  };
+  });
+}
 
-  const trend = typeof raw?.trend === "string" && raw.trend.trim() ? raw.trend.trim() : "Steady";
-  const safeTrend = ["Up", "Down", "Steady"].includes(trend) ? trend : "Steady";
-
-  return {
-    id: typeof raw?.id === "string" && raw.id.trim() ? raw.id.trim() : String(Date.now()),
-    name: typeof raw?.name === "string" && raw.name.trim() ? raw.name.trim() : className,
-    pscData: [findEntry("Paris"), findEntry("Tokyo"), findEntry("USCG")],
-    trend: safeTrend,
-    trendReason:
-      typeof raw?.trendReason === "string" && raw.trendReason.trim()
-        ? raw.trendReason.trim()
-        : "Performance summary generated from available PSC regime information.",
-    lastUpdated: typeof raw?.lastUpdated === "string" && raw.lastUpdated.trim() ? raw.lastUpdated.trim() : now,
-  };
+function normalizeTrend(value: unknown): "Up" | "Down" | "Steady" {
+  if (typeof value !== "string") return "Steady";
+  const clean = value.trim().toLowerCase();
+  if (clean === "up") return "Up";
+  if (clean === "down") return "Down";
+  return "Steady";
 }
 
 export default async (req: Request, _context: Context) => {
   if (req.method !== "POST") {
-    return new Response(JSON.stringify({ error: "Method not allowed" }), {
-      status: 405,
-      headers: { "Content-Type": "application/json" },
-    });
+    return jsonResponse({ error: "Method not allowed" }, 405);
   }
 
   try {
     const { className } = await req.json();
 
     if (!className) {
-      return new Response(JSON.stringify({ error: "className is required" }), {
-        status: 400,
-        headers: { "Content-Type": "application/json" },
-      });
+      return jsonResponse({ error: "className is required" }, 400);
     }
 
-    const prompt = `Find the latest publicly available Port State Control performance for Classification Society "${className}".
+    const now = new Date().toISOString();
+    const id = `${Date.now()}`;
 
-Check Paris MoU, Tokyo MoU, and USCG class/RO performance or targeting/non-targeted information where available.
+    const prompt = `Find the latest Port State Control performance and recognition/performance status for Classification Society "${className}".
 
-Return strictly one valid JSON object with these exact keys:
+Check, where available:
+- Paris MoU classification society performance information
+- Tokyo MoU recognized organization / classification society performance information
+- USCG classification society / recognized organization performance information
+
+Return strictly this JSON object with exactly these keys:
 {
-  "id": "${Date.now()}",
+  "id": "${id}",
   "name": "${className}",
   "pscData": [
-    { "mou": "Paris MoU", "listStatus": "White List/Grey List/Black List/Unknown", "performanceLevel": "High/Medium/Low/Unknown" },
-    { "mou": "Tokyo MoU", "listStatus": "White List/Grey List/Black List/Unknown", "performanceLevel": "High/Medium/Low/Unknown" },
-    { "mou": "USCG", "listStatus": "Non-Targeted/Targeted/Unknown", "performanceLevel": "High/Medium/Low/Unknown" }
+    { "mou": "Paris MoU", "listStatus": "White List / Grey List / Black List / Recognized / Unknown", "performanceLevel": "High / Medium / Low / Unknown" },
+    { "mou": "Tokyo MoU", "listStatus": "White List / Grey List / Black List / Recognized / Unknown", "performanceLevel": "High / Medium / Low / Unknown" },
+    { "mou": "USCG", "listStatus": "Targeted / Non-Targeted / Recognized / Unknown", "performanceLevel": "High / Medium / Low / Unknown" }
   ],
   "trend": "Up",
-  "trendReason": "Explanation of performance across PSC regimes.",
-  "lastUpdated": "${new Date().toISOString()}"
+  "trendReason": "Short explanation of the performance across the checked regimes.",
+  "lastUpdated": "${now}"
 }
 
 Rules:
-- JSON only.
-- Keep exact key names.
 - trend must be exactly one of: Up, Down, Steady.
-- Use Unknown only if the data cannot be verified.`;
+- Do not invent data.
+- Use Unknown only when web search cannot verify the field.
+- Keep pscData with exactly Paris MoU, Tokyo MoU, and USCG rows.`;
 
-    let result: any;
-    const maxAttempts = 2;
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      try {
-        result = await callWithTimeout(() => callOpenRouter(prompt), 35000);
-        break;
-      } catch (err) {
-        if (attempt === maxAttempts) throw err;
-        await new Promise((r) => setTimeout(r, 1000));
-      }
-    }
+    const result = await callOpenRouterJSON(prompt);
 
-    return new Response(JSON.stringify(normalizeClassResult(result, className)), {
-      status: 200,
-      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
-    });
+    const normalized = {
+      id: toStringValue(result.id, id),
+      name: toStringValue(result.name, className),
+      pscData: normalizePSCData(result.pscData),
+      trend: normalizeTrend(result.trend),
+      trendReason: toStringValue(result.trendReason, "No verified trend explanation available."),
+      lastUpdated: toStringValue(result.lastUpdated, now),
+    };
+
+    return jsonResponse(normalized);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Internal server error";
     console.error("Class analysis error:", message);
-    return new Response(JSON.stringify({ error: message }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
+    return jsonResponse({ error: message }, 500);
   }
 };
 
