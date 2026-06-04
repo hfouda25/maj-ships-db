@@ -1,24 +1,28 @@
 import type { Context } from "@netlify/functions";
 
-type PSCPerformance = {
-  mou: string;
-  listStatus: string;
-  performanceLevel: string;
+type OpenRouterConfig = {
+  apiKey: string;
+  model: string;
 };
 
-type ClassSocietyData = {
-  id: string;
-  name: string;
-  pscData: PSCPerformance[];
-  trend: "Up" | "Down" | "Steady";
-  trendReason: string;
-  lastUpdated: string;
-};
+function getOpenRouterConfig(): OpenRouterConfig {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  const configuredModel = process.env.OPENROUTER_MODEL || "openai/gpt-4o-mini";
 
-const DEFAULT_MODEL = "openai/gpt-4o-mini";
+  if (!apiKey) {
+    throw new Error("OPENROUTER_API_KEY environment variable is not configured");
+  }
 
-function jsonResponse(data: unknown, status = 200) {
-  return new Response(JSON.stringify(data), {
+  // Class performance needs current Paris MoU / Tokyo MoU / USCG data.
+  const model = configuredModel.endsWith(":online")
+    ? configuredModel
+    : `${configuredModel}:online`;
+
+  return { apiKey, model };
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
     status,
     headers: {
       "Content-Type": "application/json",
@@ -27,87 +31,87 @@ function jsonResponse(data: unknown, status = 200) {
   });
 }
 
-function getOpenRouterConfig() {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  const model = process.env.OPENROUTER_MODEL || DEFAULT_MODEL;
-
-  if (!apiKey) {
-    throw new Error("OPENROUTER_API_KEY environment variable is not configured");
-  }
-
-  return { apiKey, model };
-}
-
-function cleanText(value: unknown, fallback = "Unknown"): string {
-  if (typeof value !== "string") return fallback;
-  const cleaned = value.trim();
-  return cleaned.length > 0 ? cleaned : fallback;
-}
-
-function normalizeTrend(value: unknown): "Up" | "Down" | "Steady" {
-  const text = cleanText(value, "Steady").toLowerCase();
-  if (text.includes("up") || text.includes("improv")) return "Up";
-  if (text.includes("down") || text.includes("declin") || text.includes("worse")) return "Down";
-  return "Steady";
-}
-
-function normalizePSCItem(item: any, mou: string): PSCPerformance {
-  return {
-    mou,
-    listStatus: cleanText(item?.listStatus || item?.status || item?.list || item?.category, "Unknown"),
-    performanceLevel: cleanText(item?.performanceLevel || item?.performance || item?.level, "N/A"),
-  };
-}
-
-function normalizeClassData(raw: any, className: string): ClassSocietyData {
-  const pscArray = Array.isArray(raw?.pscData) ? raw.pscData : [];
-
-  const findByMou = (mou: string) => {
-    const lowerMou = mou.toLowerCase();
-    return pscArray.find((x: any) => cleanText(x?.mou, "").toLowerCase().includes(lowerMou.split(" ")[0]));
-  };
-
-  return {
-    id: cleanText(raw?.id, `${Date.now()}`),
-    name: cleanText(raw?.name, className),
-    pscData: [
-      normalizePSCItem(findByMou("Paris MoU") || pscArray[0], "Paris MoU"),
-      normalizePSCItem(findByMou("Tokyo MoU") || pscArray[1], "Tokyo MoU"),
-      normalizePSCItem(findByMou("USCG") || pscArray[2], "USCG"),
-    ],
-    trend: normalizeTrend(raw?.trend),
-    trendReason: cleanText(raw?.trendReason || raw?.reason || raw?.summary, "Class performance review completed. Detailed public performance may require verification from the latest PSC publications."),
-    lastUpdated: new Date().toISOString(),
-  };
-}
-
-function extractJSON(text: string): any | null {
+function parseJSON(text: string): any | null {
   try {
-    const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    const cleaned = text.trim();
+    const fenced = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
     if (fenced?.[1]) return JSON.parse(fenced[1].trim());
 
-    const start = text.indexOf("{");
-    const end = text.lastIndexOf("}");
+    const start = cleaned.indexOf("{");
+    const end = cleaned.lastIndexOf("}");
     if (start !== -1 && end !== -1 && end > start) {
-      return JSON.parse(text.slice(start, end + 1));
+      return JSON.parse(cleaned.slice(start, end + 1));
     }
 
-    return JSON.parse(text.trim());
+    return JSON.parse(cleaned);
   } catch {
     return null;
   }
 }
 
+function normalizeStatus(value: unknown): string {
+  if (typeof value !== "string") return "Unknown";
+  const clean = value.trim();
+  return clean || "Unknown";
+}
+
+function normalizePerformance(value: unknown): string {
+  if (typeof value !== "string") return "Unknown";
+  const clean = value.trim();
+  return clean || "Unknown";
+}
+
+function normalizeTrend(value: unknown): "Up" | "Down" | "Steady" {
+  if (value === "Up" || value === "Down" || value === "Steady") return value;
+  return "Steady";
+}
+
+function normalizeClassResult(raw: any, className: string) {
+  const pscData = Array.isArray(raw?.pscData) ? raw.pscData : [];
+  const byMou = (name: string) =>
+    pscData.find((item: any) =>
+      typeof item?.mou === "string" && item.mou.toLowerCase().includes(name.toLowerCase())
+    );
+
+  return {
+    id: typeof raw?.id === "string" ? raw.id : `${className}-${Date.now()}`,
+    name: typeof raw?.name === "string" && raw.name.trim() ? raw.name.trim() : className,
+    pscData: [
+      {
+        mou: "Paris MoU",
+        listStatus: normalizeStatus(byMou("Paris")?.listStatus),
+        performanceLevel: normalizePerformance(byMou("Paris")?.performanceLevel),
+      },
+      {
+        mou: "Tokyo MoU",
+        listStatus: normalizeStatus(byMou("Tokyo")?.listStatus),
+        performanceLevel: normalizePerformance(byMou("Tokyo")?.performanceLevel),
+      },
+      {
+        mou: "USCG",
+        listStatus: normalizeStatus(byMou("USCG")?.listStatus),
+        performanceLevel: normalizePerformance(byMou("USCG")?.performanceLevel),
+      },
+    ],
+    trend: normalizeTrend(raw?.trend),
+    trendReason:
+      typeof raw?.trendReason === "string" && raw.trendReason.trim()
+        ? raw.trendReason.trim()
+        : "Updated using available public PSC performance information.",
+    lastUpdated: new Date().toISOString(),
+  };
+}
+
 async function callWithTimeout<T>(fn: () => Promise<T>, timeoutMs: number): Promise<T> {
   return Promise.race([
     fn(),
-    new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error("OpenRouter request timed out")), timeoutMs);
-    }),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("AI request timed out")), timeoutMs)
+    ),
   ]);
 }
 
-async function callOpenRouter(prompt: string): Promise<string> {
+async function callOpenRouterJSON(prompt: string): Promise<any> {
   const { apiKey, model } = getOpenRouterConfig();
 
   const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -116,7 +120,7 @@ async function callOpenRouter(prompt: string): Promise<string> {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
       "HTTP-Referer": process.env.URL || "https://maj-ship-db.netlify.app",
-      "X-Title": "MAJ Ship DB",
+      "X-Title": "MAJ Ships DB",
     },
     body: JSON.stringify({
       model,
@@ -124,47 +128,35 @@ async function callOpenRouter(prompt: string): Promise<string> {
         {
           role: "system",
           content:
-            "You are a maritime PSC/classification society performance assistant. Return only one valid JSON object. Do not use markdown. Do not add explanations outside JSON. Use Unknown or N/A where current public data is not confirmed.",
+            "You are a maritime PSC performance assistant. Use current public web information where available, especially Paris MoU, Tokyo MoU, and USCG recognized organization/class performance data. Return only one valid JSON object. Do not return markdown. Do not invent data.",
         },
         { role: "user", content: prompt },
       ],
       temperature: 0.1,
-      max_tokens: 900,
+      response_format: { type: "json_object" },
     }),
   });
 
+  const responseText = await response.text();
+
   if (!response.ok) {
-    const errorText = await response.text().catch(() => "");
-    throw new Error(`OpenRouter request failed ${response.status}: ${errorText}`);
+    throw new Error(`OpenRouter request failed: ${response.status} ${responseText}`);
   }
 
-  const data = await response.json();
+  const data = JSON.parse(responseText);
   const content = data?.choices?.[0]?.message?.content;
+  const text = typeof content === "string"
+    ? content
+    : Array.isArray(content)
+      ? content.map((part) => part?.text || "").join("\n")
+      : "";
 
-  if (typeof content === "string" && content.trim()) return content.trim();
-
-  if (Array.isArray(content)) {
-    const combined = content.map((part: any) => part?.text || part?.content || "").join("\n").trim();
-    if (combined) return combined;
+  const parsed = parseJSON(text);
+  if (!parsed) {
+    throw new Error("OpenRouter returned non-JSON class data");
   }
 
-  throw new Error("OpenRouter returned empty content");
-}
-
-function fallbackClassData(className: string): ClassSocietyData {
-  return {
-    id: `${Date.now()}`,
-    name: className,
-    pscData: [
-      { mou: "Paris MoU", listStatus: "Unknown", performanceLevel: "N/A" },
-      { mou: "Tokyo MoU", listStatus: "Unknown", performanceLevel: "N/A" },
-      { mou: "USCG", listStatus: "Unknown", performanceLevel: "N/A" },
-    ],
-    trend: "Steady",
-    trendReason:
-      "Automatic AI update could not confirm the latest class performance from public PSC sources. Please verify against the latest Paris MoU, Tokyo MoU, and USCG class/RO performance publications.",
-    lastUpdated: new Date().toISOString(),
-  };
+  return parsed;
 }
 
 export default async (req: Request, _context: Context) => {
@@ -173,56 +165,57 @@ export default async (req: Request, _context: Context) => {
   }
 
   try {
-    const body = await req.json().catch(() => ({}));
-    const className = cleanText(body?.className, "");
+    const { className } = await req.json();
 
     if (!className) {
       return jsonResponse({ error: "className is required" }, 400);
     }
 
-    const prompt = `Analyze Classification Society / Recognized Organization PSC performance for: ${className}
+    const prompt = `Search current public web sources for the latest PSC / Recognized Organization performance of the Classification Society "${className}".
 
-Return exactly this JSON shape:
+Check where available:
+- Paris MoU recognized organization or class society performance / white-grey-black status
+- Tokyo MoU recognized organization or class society performance / white-grey-black status
+- USCG recognized organization performance, targeted / non-targeted or similar status
+
+Return strictly this JSON object and keep these exact field names:
 {
-  "id": "${Date.now()}",
+  "id": "${className}-${Date.now()}",
   "name": "${className}",
   "pscData": [
-    { "mou": "Paris MoU", "listStatus": "White List / Grey List / Black List / Unknown", "performanceLevel": "High / Medium / Low / N/A" },
-    { "mou": "Tokyo MoU", "listStatus": "White List / Grey List / Black List / Unknown", "performanceLevel": "High / Medium / Low / N/A" },
-    { "mou": "USCG", "listStatus": "Non-Targeted / Targeted / Unknown", "performanceLevel": "High / Medium / Low / N/A" }
+    { "mou": "Paris MoU", "listStatus": "Unknown", "performanceLevel": "Unknown" },
+    { "mou": "Tokyo MoU", "listStatus": "Unknown", "performanceLevel": "Unknown" },
+    { "mou": "USCG", "listStatus": "Unknown", "performanceLevel": "Unknown" }
   ],
-  "trend": "Up / Down / Steady",
-  "trendReason": "short practical explanation",
+  "trend": "Steady",
+  "trendReason": "Brief explanation of the available performance information.",
   "lastUpdated": "${new Date().toISOString()}"
 }
 
-Important rules:
-- JSON only.
-- No markdown.
-- No undefined/null values.
-- Keep fields exactly as above.
-- If current data is not clearly available, use Unknown or N/A.`;
+Rules:
+- Return JSON only.
+- Do not rename any key.
+- trend must be exactly "Up", "Down", or "Steady".
+- Use Unknown/N/A only if the data cannot be verified.`;
 
-    let aiText = "";
-    try {
-      aiText = await callWithTimeout(() => callOpenRouter(prompt), 22000);
-    } catch (aiError) {
-      console.error("Class analysis OpenRouter error:", aiError instanceof Error ? aiError.message : aiError);
-      return jsonResponse(fallbackClassData(className), 200);
+    let raw: any;
+    const maxAttempts = 2;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        raw = await callWithTimeout(() => callOpenRouterJSON(prompt), 30000);
+        break;
+      } catch (err) {
+        if (attempt === maxAttempts) throw err;
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
     }
 
-    const parsed = extractJSON(aiText);
-
-    if (!parsed) {
-      console.error("Class analysis JSON parse failed. Raw AI text:", aiText.slice(0, 1000));
-      return jsonResponse(fallbackClassData(className), 200);
-    }
-
-    const result = normalizeClassData(parsed, className);
-    return jsonResponse(result, 200);
-  } catch (error) {
-    console.error("Class analysis function error:", error instanceof Error ? error.message : error);
-    return jsonResponse({ error: error instanceof Error ? error.message : "Internal server error" }, 500);
+    return jsonResponse(normalizeClassResult(raw, className));
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Internal server error";
+    console.error("Class analysis error:", message);
+    return jsonResponse({ error: message }, 500);
   }
 };
 
