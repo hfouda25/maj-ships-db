@@ -1,0 +1,103 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: email (lowercase)
+    // Fields:
+    //   - name: string (required)
+    //   - email: string (required, email format)
+    //   - password: string (required)
+    //   - role: string (required, ['admin', 'user'])
+    //   - createdAt: string (required, date-time)
+    //
+    // Collection: ships
+    // Document ID: shipId
+    // Fields:
+    //   - name: string (required)
+    //   - imo: string (required)
+    //   - vesselType: string
+    //   - flag: string
+    //   - grossTonnage: number (required)
+    //   - registrationDate: string (required)
+    //   - sanctionStatus: string
+    //   - inspections: list
+    //
+    // Collection: surveyors
+    // Document ID: surveyorId
+    // Fields:
+    //   - name: string (required)
+    //   - location: string (required)
+    //   - email: string (required)
+    //   - phone: string (required)
+    //   - company: string
+    //
+    // Collection: exemptions
+    // Document ID: exemptionId
+    // Fields:
+    //   - vesselName: string (required)
+    //   - imoNumber: string (required)
+    //   - type: string (required, ['Exemption', 'Extension'])
+    //   - description: string (required)
+    //   - regulationRef: string
+    //   - validFrom: string
+    //   - validTo: string
+    //   - status: string (required, ['Pending', 'Approved', 'Rejected', 'Expired'])
+    //   - remarks: string
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.token.email)).data.role == 'admin' ||
+         (request.auth.token.email == "admin@jamaicaships.com"));
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    // ===============================================================
+    // Collection Rules
+    // ===============================================================
+
+    match /users/{email} {
+      allow read, write: if true;
+    }
+
+    match /ships/{shipId} {
+      allow read, write: if true;
+    }
+
+    match /surveyors/{surveyorId} {
+      allow read, write: if true;
+    }
+
+    match /exemptions/{exemptionId} {
+      allow read, write: if true;
+    }
+
+    match /classes/{classId} {
+      allow read, write: if true;
+    }
+  }
+}
